@@ -1,0 +1,27 @@
+# Render Blueprint（https://render.com/docs/blueprint-spec）
+# Render のダッシュボードで「New +」→「Blueprint」からこのリポジトリを選ぶと、
+# サーバー（Web Service）とクライアント（Static Site）をまとめてデプロイできる。
+# フィールド名は将来Renderの仕様変更で変わる可能性があるため、失敗した場合は
+# docs/deploy-render.md の手動手順を使うこと。
+services:
+  - type: web
+    name: mk-online-server
+    env: node
+    plan: free
+    rootDir: .
+    buildCommand: npm install
+    startCommand: npm run start --workspace server
+    envVars:
+      - key: CORS_ORIGIN
+        sync: false # クライアントのURL確定後に手動で設定する
+      - key: NODE_VERSION
+        value: 20.18.0
+
+  - type: static
+    name: mk-online-client
+    rootDir: .
+    buildCommand: npm install && npm run build --workspace client
+    staticPublishPath: client/dist
+    envVars:
+      - key: VITE_SERVER_URL
+        sync: false # サーバーのURL確定後に手動で設定する
