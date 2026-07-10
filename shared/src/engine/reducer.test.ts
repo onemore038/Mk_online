@@ -52,7 +52,7 @@ describe("GAIN_POWER", () => {
   it("サイコロパンカードで好きなパワーを獲得できる", () => {
     const state = buildTestState({
       players: {
-        p1: buildTestPlayer("p1", "char.marie", { diceBreadCards: 2 }),
+        p1: buildTestPlayer("p1", "char.marie", { diceBreadCards: [1, 1] }),
         p2: buildTestPlayer("p2", "char.marie"),
       },
     });
@@ -64,7 +64,7 @@ describe("GAIN_POWER", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.players.p1!.power.magic).toBe(1);
-    expect(result.value.players.p1!.diceBreadCards).toBe(1);
+    expect(result.value.players.p1!.diceBreadCards).toHaveLength(1);
     expect(result.value.diceBreadDiscardCount).toBe(1);
   });
 });
@@ -143,6 +143,152 @@ describe("レジェンドカード設置の1ターン1枚制限", () => {
   });
 });
 
+describe("レジェンドⅠ/Ⅱの対応関係", () => {
+  it("対応するⅠが未設置のⅡはlegend2Rowに無く、設置しようとするとCARD_NOT_IN_ROWになる", () => {
+    const state = buildTestState({
+      legendColumns: [{ legend1Id: "leg1.koppepanShrine", legend2Id: "leg2.eggBenedictMall" }],
+      legend1Row: ["leg1.koppepanShrine"],
+      legend2Row: [],
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.eggBenedictMall",
+        row: "legend2",
+        dieIndices: [],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("CARD_NOT_IN_ROW");
+  });
+
+  it("Ⅰを設置すると、対応するⅡがlegend2Rowに追加される", () => {
+    const state = buildTestState({
+      legendColumns: [{ legend1Id: "leg1.rainbowDragonEgg", legend2Id: "leg2.eggBenedictMall" }],
+      legend1Row: ["leg1.rainbowDragonEgg"],
+      legend2Row: [],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          power: { money: 8, authority: 8, magic: 8 },
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg1.rainbowDragonEgg",
+        row: "legend1",
+        dieIndices: [],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.legend1Row).toEqual([]);
+    expect(result.value.legend2Row).toEqual(["leg2.eggBenedictMall"]);
+  });
+});
+
+describe("レジェンドカード設置（捨て札コスト）", () => {
+  it("requiredDiscards を満たしていれば設置でき、対象カードが捨て札になる", () => {
+    const state = buildTestState({
+      legend2Row: ["leg2.eggBenedictMall"],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          installed: [
+            { instanceId: "i1", cardId: "std.bakery", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i2", cardId: "std.tavern", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i3", cardId: "std.cakeShop", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i4", cardId: "std.church", installedThisTurn: false, usedThisTurn: false },
+          ],
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.eggBenedictMall",
+        row: "legend2",
+        dieIndices: [],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.players.p1!.installed.map((c) => c.cardId)).toEqual([
+      "leg2.eggBenedictMall",
+    ]);
+    expect(result.value.marketDiscard).toEqual(
+      expect.arrayContaining(["std.bakery", "std.tavern", "std.cakeShop", "std.church"]),
+    );
+    expect(result.value.players.p1!.victoryPoints).toBe(13);
+  });
+
+  it("requiredDiscards を満たさなければ INSUFFICIENT_DISCARD_MATERIAL で拒否される", () => {
+    const state = buildTestState({
+      legend2Row: ["leg2.eggBenedictMall"],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", { installed: [] }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.eggBenedictMall",
+        row: "legend2",
+        dieIndices: [],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INSUFFICIENT_DISCARD_MATERIAL");
+  });
+
+  it("requiredDiceBreadCount を満たしていなければ拒否される", () => {
+    const state = buildTestState({
+      legend2Row: ["leg2.twilightWheatField"],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          diceBreadCards: [1, 1, 1],
+          installed: [
+            { instanceId: "i1", cardId: "std.warehouse", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i2", cardId: "std.oven", installedThisTurn: false, usedThisTurn: false },
+          ],
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.twilightWheatField",
+        row: "legend2",
+        dieIndices: [],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INSUFFICIENT_DISCARD_MATERIAL");
+  });
+});
+
 describe("手札上限とターン終了", () => {
   it("手札が上限を超えていると END_TURN は拒否される", () => {
     const state = buildTestState({
@@ -178,6 +324,49 @@ describe("手札上限とターン終了", () => {
     if (!endResult.ok) return;
     expect(endResult.value.currentPlayerIndex).toBe(1);
     expect(endResult.value.phase).toBe("turnStart");
+  });
+
+  it("手札上限はマーケットカードとサイコロパンカードの合計に適用される", () => {
+    const state = buildTestState({
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          hand: ["a", "b", "c", "d"],
+          diceBreadCards: [1, 1, 1],
+          handLimit: 6,
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(state, { type: "END_TURN", playerId: "p1" }, rng());
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("MUST_DISCARD_FIRST");
+  });
+
+  it("DISCARD_TO_HAND_LIMIT でサイコロパンカードを捨てて上限内に収められる", () => {
+    let state = buildTestState({
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          hand: ["a", "b", "c", "d"],
+          diceBreadCards: [1, 1, 1],
+          handLimit: 6,
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const discardResult = applyAction(
+      state,
+      { type: "DISCARD_TO_HAND_LIMIT", playerId: "p1", cardIds: [], discardDiceBreadCount: 1 },
+      rng(),
+    );
+    expect(discardResult.ok).toBe(true);
+    if (!discardResult.ok) return;
+    state = discardResult.value;
+    expect(state.players.p1!.diceBreadCards).toHaveLength(2);
+    expect(state.diceBreadDiscardCount).toBe(1);
+
+    const endResult = applyAction(state, { type: "END_TURN", playerId: "p1" }, rng());
+    expect(endResult.ok).toBe(true);
   });
 
   it("設置済みカードの使用済みフラグはターン終了時にリセットされる", () => {
@@ -241,23 +430,288 @@ describe("20VP到達と終了判定", () => {
   });
 });
 
-describe("INSTALL_CARD / PLACE_LEGEND_CARD（数値未確認カード）", () => {
-  it("コストが未確認のカードは設置できず、NotImplementedErrorになる", () => {
+describe("レジェンドカード設置（任意の手札カード捨て札コスト）", () => {
+  it("anyDiscardCardIds を14枚指定すればポレポレ鳥の秘境を設置できる", () => {
+    const hand = Array.from({ length: 14 }, (_, i) => `card${i}`);
     const state = buildTestState({
+      legend2Row: ["leg2.polepoleBirdSanctuary"],
       players: {
-        p1: buildTestPlayer("p1", "char.marie", { hand: ["std.bakery"] }),
+        p1: buildTestPlayer("p1", "char.marie", { hand }),
         p2: buildTestPlayer("p2", "char.marie"),
       },
     });
     const result = applyAction(
       state,
-      { type: "INSTALL_CARD", playerId: "p1", cardId: "std.bakery", dieIndices: [] },
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.polepoleBirdSanctuary",
+        row: "legend2",
+        dieIndices: [],
+        anyDiscardCardIds: hand,
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.players.p1!.hand).toEqual([]);
+    expect(result.value.marketDiscard).toEqual(expect.arrayContaining(hand));
+    expect(result.value.players.p1!.victoryPoints).toBe(10);
+  });
+
+  it("指定枚数が14枚に満たなければ DISCARD_COUNT_MISMATCH で拒否される", () => {
+    const hand = Array.from({ length: 14 }, (_, i) => `card${i}`);
+    const state = buildTestState({
+      legend2Row: ["leg2.polepoleBirdSanctuary"],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", { hand }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.polepoleBirdSanctuary",
+        row: "legend2",
+        dieIndices: [],
+        anyDiscardCardIds: hand.slice(0, 13),
+      },
       rng(),
     );
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.error.code).toBe("NOT_IMPLEMENTED");
-    // 失敗時は手札が変化していないこと（純粋関数であること）を確認
-    expect(state.players.p1!.hand).toEqual(["std.bakery"]);
+    expect(result.error.code).toBe("DISCARD_COUNT_MISMATCH");
+  });
+});
+
+describe("レジェンドカード設置（出目合計コスト）", () => {
+  it("ダイスとサイコロパンの出目合計が36以上なら無限鏡の大迷宮を設置できる", () => {
+    const state = buildTestState({
+      legend2Row: ["leg2.infiniteMirrorMaze"],
+      dice: [
+        { face: 6, used: false },
+        { face: 6, used: false },
+        { face: 6, used: false },
+        { face: 6, used: false },
+      ],
+      players: {
+        // 4ダイス×6 = 24 + サイコロパン6+6 = 36
+        p1: buildTestPlayer("p1", "char.marie", { diceBreadCards: [6, 6] }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.infiniteMirrorMaze",
+        row: "legend2",
+        dieIndices: [0, 1, 2, 3],
+        diceBreadIndices: [0, 1],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.dice.every((d) => d.used)).toBe(true);
+    expect(result.value.players.p1!.diceBreadCards).toEqual([]);
+    expect(result.value.diceBreadDiscardCount).toBe(2);
+    expect(result.value.players.p1!.victoryPoints).toBe(10);
+  });
+
+  it("出目合計が36未満なら INSUFFICIENT_PIP_SUM で拒否される", () => {
+    const state = buildTestState({
+      legend2Row: ["leg2.infiniteMirrorMaze"],
+      dice: [
+        { face: 6, used: false },
+        { face: 6, used: false },
+      ],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", { diceBreadCards: [6] }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg2.infiniteMirrorMaze",
+        row: "legend2",
+        dieIndices: [0, 1],
+        diceBreadIndices: [0],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("INSUFFICIENT_PIP_SUM");
+  });
+});
+
+describe("ダイスの出目一致検証", () => {
+  it("要求と異なる出目のダイスで設置しようとするとDICE_FACE_MISMATCHで拒否される", () => {
+    // std.bakery は出目1or2を1個要求する。出目5のダイスでは満たせない。
+    const state = buildTestState({
+      dice: [{ face: 5, used: false }],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat", { hand: ["std.bakery"], power: { money: 2, authority: 0, magic: 0 } }),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      { type: "INSTALL_CARD", playerId: "p1", cardId: "std.bakery", dieIndices: [0] },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("DICE_FACE_MISMATCH");
+  });
+
+  it("要求どおりの出目のダイスなら設置できる", () => {
+    const state = buildTestState({
+      dice: [{ face: 2, used: false }],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat", { hand: ["std.bakery"], power: { money: 2, authority: 0, magic: 0 } }),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      { type: "INSTALL_CARD", playerId: "p1", cardId: "std.bakery", dieIndices: [0] },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("2グループ条件（徴税の路地裏: 出目1を1個・出目6を1個）は同じダイスを使い回せない", () => {
+    // 出目1が2個では「出目6を1個」のグループを満たせないため拒否される
+    const state = buildTestState({
+      dice: [
+        { face: 1, used: false },
+        { face: 1, used: false },
+      ],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat", {
+          hand: ["adv.taxAlley"],
+          power: { money: 2, authority: 1, magic: 1 },
+        }),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      { type: "INSTALL_CARD", playerId: "p1", cardId: "adv.taxAlley", dieIndices: [0, 1] },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("DICE_FACE_MISMATCH");
+  });
+
+  it("2グループ条件を出目1個ずつで満たせば設置できる", () => {
+    const state = buildTestState({
+      dice: [
+        { face: 1, used: false },
+        { face: 6, used: false },
+      ],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat", {
+          hand: ["adv.taxAlley"],
+          power: { money: 2, authority: 1, magic: 1 },
+        }),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      { type: "INSTALL_CARD", playerId: "p1", cardId: "adv.taxAlley", dieIndices: [0, 1] },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("ベーグルの塔：出目が重複していると設置できない", () => {
+    const state = buildTestState({
+      dice: [
+        { face: 1, used: false },
+        { face: 1, used: false },
+        { face: 3, used: false },
+        { face: 4, used: false },
+        { face: 5, used: false },
+        { face: 6, used: false },
+      ],
+      legend1Row: ["leg1.bagelTower"],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat"),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg1.bagelTower",
+        row: "legend1",
+        dieIndices: [0, 1, 2, 3, 4, 5],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.code).toBe("DICE_FACE_MISMATCH");
+  });
+
+  it("ベーグルの塔：出目1〜6が1つずつ揃えば設置できる", () => {
+    const state = buildTestState({
+      dice: [
+        { face: 1, used: false },
+        { face: 2, used: false },
+        { face: 3, used: false },
+        { face: 4, used: false },
+        { face: 5, used: false },
+        { face: 6, used: false },
+      ],
+      legend1Row: ["leg1.bagelTower"],
+      players: {
+        p1: buildTestPlayer("p1", "char.chocolat"),
+        p2: buildTestPlayer("p2", "char.chocolat"),
+      },
+    });
+    const result = applyAction(
+      state,
+      {
+        type: "PLACE_LEGEND_CARD",
+        playerId: "p1",
+        cardId: "leg1.bagelTower",
+        row: "legend1",
+        dieIndices: [0, 1, 2, 3, 4, 5],
+      },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it("マリーの割引適用時：出目条件は残りのダイスで満たせればよい", () => {
+    // std.tavern は出目3or4を1個要求するが、マリーは1個不要にできる。
+    // 割引でダイス0個になるため、出目チェックは自動的に通る（提供する出目0個は常にどのグループにも矛盾しない）。
+    const state = buildTestState({
+      dice: [],
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", { hand: ["std.tavern"], power: { money: 0, authority: 2, magic: 0 } }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+    const result = applyAction(
+      state,
+      { type: "INSTALL_CARD", playerId: "p1", cardId: "std.tavern", dieIndices: [] },
+      rng(),
+    );
+    expect(result.ok).toBe(true);
   });
 });

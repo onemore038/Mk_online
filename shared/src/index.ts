@@ -8,4 +8,5 @@ export * from "./engine/market.js";
 export * from "./engine/draft.js";
 export * from "./engine/reducer.js";
 export * from "./engine/view.js";
+export * from "./engine/diceFaceMatching.js";
 export * from "./socket.js";

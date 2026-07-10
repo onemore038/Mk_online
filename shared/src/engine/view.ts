@@ -1,4 +1,5 @@
 import type { GameState, PlayerState } from "../types.js";
+import { computeTotalVictoryPoints } from "./cardEffects.js";
 
 const HIDDEN = "?";
 
@@ -7,11 +8,17 @@ const HIDDEN = "?";
  * 自分以外の手札・ドラフトパケット・山札の中身は伏せ札にする（枚数はそのまま見える）。
  * サーバーは room.game をそのまま全員へブロードキャストせず、必ずこの関数を通してから送ること
  * （手札は非公開情報という公式FAQのルールをサーバーレベルで担保するため）。
+ *
+ * victoryPoints は、パンの妖精コッペン等の動的VP計算式（victoryPointsFormula）による加算分を
+ * 含んだ合計値に差し替えて送る（内部の player.victoryPoints は基礎分のみを保持し続ける。
+ * 20VP到達判定・最終勝敗判定は reducer.ts 側で computeTotalVictoryPoints を都度計算して使うため、
+ * ここでの表示専用の上書きが内部状態に影響することはない）。
  */
 export function getPlayerView(state: GameState, viewerId: string): GameState {
   const players: Record<string, PlayerState> = {};
   for (const [id, p] of Object.entries(state.players)) {
-    players[id] = id === viewerId ? p : { ...p, hand: p.hand.map(() => HIDDEN) };
+    const displayed = id === viewerId ? p : { ...p, hand: p.hand.map(() => HIDDEN) };
+    players[id] = { ...displayed, victoryPoints: computeTotalVictoryPoints(state, id) };
   }
 
   const draft = state.draft
@@ -31,7 +38,5 @@ export function getPlayerView(state: GameState, viewerId: string): GameState {
     players,
     draft,
     marketDeck: state.marketDeck.map(() => HIDDEN),
-    legend1Deck: state.legend1Deck.map(() => HIDDEN),
-    legend2Deck: state.legend2Deck.map(() => HIDDEN),
   };
 }

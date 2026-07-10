@@ -88,7 +88,8 @@ button {
 .grid { display: grid; gap: 10px; }
 .grid.cards { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
 
-input[type="text"] {
+input[type="text"],
+input[type="number"] {
   background: var(--panel-2);
   border: 1px solid var(--border);
   color: var(--ink);
