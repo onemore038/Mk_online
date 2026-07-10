@@ -47,9 +47,11 @@ export function setupGame(options: SetupOptions): GameState {
   }
   for (const p of players) {
     const total = POWER_TYPES.reduce((sum, t) => sum + p.initialPower[t], 0);
-    if (total !== 4) {
+    // ロールはゲーム開始時、通常4個に加えて追加の10個（内訳自由）を得るため合計14個になる
+    const expected = p.characterId === "char.roll" ? 14 : 4;
+    if (total !== expected) {
       throw new EngineError(
-        `初期パワーの合計は4個である必要があります（プレイヤー ${p.playerId}: ${total}個）`,
+        `初期パワーの合計は${expected}個である必要があります（プレイヤー ${p.playerId}: ${total}個）`,
         "INVALID_INITIAL_POWER",
       );
     }
@@ -81,12 +83,28 @@ export function setupGame(options: SetupOptions): GameState {
   // この時点では「未配布の標準カード＋アドバンスプール」だけを山札の種にしておく。
   const marketDeckSeed = shuffle([...undealtStandardCards, ...advancePool], rng);
 
-  // --- レジェンドカード：確認できたプール（各5種）からランダムに3種を場に出す ---
-  const legend1Ids = shuffle(LEGEND1_CARDS.map((c) => c.id), rng);
-  const legend2Ids = shuffle(LEGEND2_CARDS.map((c) => c.id), rng);
+  // --- レジェンドカード：確認できたプール（各5種）からランダムに3種を選び、3列にランダムペアリングする ---
+  // （公式ルール：Ⅱは対応するⅠが設置されるまで設置できない。プール自体は本来「推奨カードセット」で
+  //   固定3種のところ、このMVPでは5種プールからランダム抽選している）
+  const legend1Selection = pickRandom(LEGEND1_CARDS, LEGEND_ROW_SIZE, rng).map((c) => c.id);
+  const legend2Selection = pickRandom(LEGEND2_CARDS, LEGEND_ROW_SIZE, rng).map((c) => c.id);
+  const legendColumns = legend1Selection.map((legend1Id, i) => ({
+    legend1Id,
+    legend2Id: legend2Selection[i]!,
+  }));
+
+  let diceBreadDeckRemaining = DICE_BREAD_TOTAL_COUNT_PLACEHOLDER;
 
   const players_: Record<string, PlayerState> = {};
   for (const p of players) {
+    // アンはゲーム開始時にサイコロパンカードを3枚獲得する
+    let initialDiceBread: number[] = [];
+    if (p.characterId === "char.anne") {
+      const count = Math.min(3, diceBreadDeckRemaining);
+      initialDiceBread = Array.from({ length: count }, () => Math.floor(rng.next() * 6) + 1);
+      diceBreadDeckRemaining -= count;
+    }
+
     players_[p.playerId] = {
       playerId: p.playerId,
       nickname: p.nickname,
@@ -96,7 +114,7 @@ export function setupGame(options: SetupOptions): GameState {
       handLimit: DEFAULT_HAND_LIMIT,
       installed: [],
       victoryPoints: 0,
-      diceBreadCards: 0,
+      diceBreadCards: initialDiceBread as PlayerState["diceBreadCards"],
       connected: true,
     };
   }
@@ -116,16 +134,17 @@ export function setupGame(options: SetupOptions): GameState {
     openMarket: [],
     marketDeck: marketDeckSeed,
     marketDiscard: [],
-    legend1Row: legend1Ids.slice(0, LEGEND_ROW_SIZE),
-    legend1Deck: legend1Ids.slice(LEGEND_ROW_SIZE),
-    legend2Row: legend2Ids.slice(0, LEGEND_ROW_SIZE),
-    legend2Deck: legend2Ids.slice(LEGEND_ROW_SIZE),
+    legendColumns,
+    legend1Row: legend1Selection,
+    // レジェンドⅡは対応するⅠが設置されるまで設置不可のため、初期状態では空（ロック状態）
+    legend2Row: [],
     legendPlacedThisTurn: false,
-    diceBreadDeckCount: DICE_BREAD_TOTAL_COUNT_PLACEHOLDER,
+    diceBreadDeckCount: diceBreadDeckRemaining,
     diceBreadDiscardCount: 0,
     turnNumber: 1,
     finalRoundTriggeredBy: null,
     winnerIds: null,
+    pendingChoices: [],
     log: [
       {
         turn: 0,

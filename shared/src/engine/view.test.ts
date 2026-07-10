@@ -33,17 +33,13 @@ describe("getPlayerView", () => {
     expect(view.draft?.packets.p2).not.toContain("std.tavern");
   });
 
-  it("山札・レジェンド山札の中身は伏せられるが枚数は変わらない", () => {
+  it("マーケット山札の中身は伏せられるが枚数は変わらない", () => {
     const state = buildTestState({
       marketDeck: ["std.bakery", "std.tavern", "std.oven"],
-      legend1Deck: ["leg1.koppepanShrine"],
-      legend2Deck: [],
     });
     const view = getPlayerView(state, "p1");
     expect(view.marketDeck).toHaveLength(3);
     expect(view.marketDeck).not.toContain("std.bakery");
-    expect(view.legend1Deck).toHaveLength(1);
-    expect(view.legend2Deck).toHaveLength(0);
   });
 
   it("元のstateを変更しない（純粋関数）", () => {
@@ -52,5 +48,31 @@ describe("getPlayerView", () => {
     });
     getPlayerView(state, "p1");
     expect(state.players.p2!.hand).toEqual(["std.tavern"]);
+  });
+
+  it("動的VPカードを持つプレイヤーのvictoryPointsは、加算分を含めた合計値になる（自分・他人どちらの視点でも）", () => {
+    // 脱法パン屋：基本1VP + パン屋1枚につき2VP。パン屋2枚設置済みなら 1 + 2*2 = 5。
+    // 内部の player.victoryPoints（基礎分）自体は0のまま変化しない想定。
+    const state = buildTestState({
+      players: {
+        p1: buildTestPlayer("p1", "char.marie", {
+          installed: [
+            { instanceId: "i1", cardId: "adv.blackMarketBakery", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i2", cardId: "std.bakery", installedThisTurn: false, usedThisTurn: false },
+            { instanceId: "i3", cardId: "std.bakery", installedThisTurn: false, usedThisTurn: false },
+          ],
+        }),
+        p2: buildTestPlayer("p2", "char.marie"),
+      },
+    });
+
+    const selfView = getPlayerView(state, "p1");
+    expect(selfView.players.p1!.victoryPoints).toBe(5);
+
+    const otherView = getPlayerView(state, "p2");
+    expect(otherView.players.p1!.victoryPoints).toBe(5);
+
+    // 元のstateの基礎victoryPointsは書き換わっていない
+    expect(state.players.p1!.victoryPoints).toBe(0);
   });
 });

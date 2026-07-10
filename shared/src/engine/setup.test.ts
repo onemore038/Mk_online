@@ -57,10 +57,15 @@ describe("setupGame", () => {
     expect(state.draft?.pendingPicks).toEqual(state.playerOrder);
   });
 
-  it("レジェンドカードは各列3枚ずつ場に出る", () => {
+  it("レジェンドⅠは3列分場に出るが、Ⅰが未設置のためⅡはまだロックされている", () => {
     const state = setupGame({ roomId: "r", players: players(2), rng: createSeededRng(7) });
     expect(state.legend1Row).toHaveLength(3);
-    expect(state.legend2Row).toHaveLength(3);
+    expect(state.legend2Row).toHaveLength(0);
+    expect(state.legendColumns).toHaveLength(3);
+    // 各列のⅠ・Ⅱがそれぞれ重複なく対応している
+    expect(new Set(state.legendColumns.map((c) => c.legend1Id)).size).toBe(3);
+    expect(new Set(state.legendColumns.map((c) => c.legend2Id)).size).toBe(3);
+    expect(state.legendColumns.map((c) => c.legend1Id).sort()).toEqual([...state.legend1Row].sort());
   });
 
   it("同じシードなら同じ結果になる（再現性）", () => {

@@ -1,4 +1,10 @@
-import type { GameState, PlayerState, InstalledCard, PowerType } from "../types.js";
+import type {
+  GameState,
+  PlayerState,
+  InstalledCard,
+  PowerType,
+  RequiredDiscard,
+} from "../types.js";
 import { DIE_FACE_TO_POWER } from "../types.js";
 import type { GameAction } from "../actions.js";
 import type { Rng } from "../rng.js";
@@ -7,6 +13,16 @@ import { getCharacter, getMarketCard } from "../cards/index.js";
 import { EngineError, NotImplementedError, type EngineResult, ok, fail } from "./errors.js";
 import { applyDraftPick } from "./draft.js";
 import { refillOpenMarket } from "./market.js";
+import { diceFacesSatisfyGroups } from "./diceFaceMatching.js";
+import {
+  applyTurnStartEffects,
+  applyInstallImmediateEffect,
+  applyOtherPlayersInstallTrigger,
+  applyOtherPlayersAcquireTrigger,
+  applyOtherPlayersDiceRollTrigger,
+  applyOtherPlayersDiceBreadGainTrigger,
+  computeTotalVictoryPoints,
+} from "./cardEffects.js";
 
 function currentPlayerId(state: GameState): string {
   return state.playerOrder[state.currentPlayerIndex]!;
@@ -53,6 +69,63 @@ function payPower(
   return ok(next);
 }
 
+/**
+ * 「特定カードを手札／設置済みカードから指定枚数捨てる」コストを支払う。
+ * 同名カードは区別しないため、どのインスタンスを捨てるかは自動的に決まる。
+ */
+function payRequiredDiscards(
+  player: PlayerState,
+  requiredDiscards: readonly RequiredDiscard[],
+): EngineResult<{ hand: string[]; installed: InstalledCard[]; discardedCardIds: string[] }> {
+  let hand = [...player.hand];
+  let installed = [...player.installed];
+  const discardedCardIds: string[] = [];
+
+  for (const req of requiredDiscards) {
+    if (req.from === "hand") {
+      const owned = hand.filter((id) => id === req.cardId).length;
+      if (owned < req.count) {
+        return fail(
+          new EngineError(
+            `手札の「${req.cardId}」が不足しています（必要: ${req.count}, 所持: ${owned}）`,
+            "INSUFFICIENT_DISCARD_MATERIAL",
+          ),
+        );
+      }
+      let remaining = req.count;
+      hand = hand.filter((id) => {
+        if (remaining > 0 && id === req.cardId) {
+          remaining -= 1;
+          discardedCardIds.push(id);
+          return false;
+        }
+        return true;
+      });
+    } else {
+      const owned = installed.filter((c) => c.cardId === req.cardId).length;
+      if (owned < req.count) {
+        return fail(
+          new EngineError(
+            `設置済みの「${req.cardId}」が不足しています（必要: ${req.count}, 所持: ${owned}）`,
+            "INSUFFICIENT_DISCARD_MATERIAL",
+          ),
+        );
+      }
+      let remaining = req.count;
+      installed = installed.filter((c) => {
+        if (remaining > 0 && c.cardId === req.cardId) {
+          remaining -= 1;
+          discardedCardIds.push(c.cardId);
+          return false;
+        }
+        return true;
+      });
+    }
+  }
+
+  return ok({ hand, installed, discardedCardIds });
+}
+
 function markDiceUsed(state: GameState, dieIndices: number[]): EngineResult<GameState["dice"]> {
   const dice = state.dice.map((d) => ({ ...d }));
   for (const idx of dieIndices) {
@@ -75,16 +148,16 @@ export function applyAction(
       return applyDraftPick(state, action, rng);
 
     case "RESOLVE_TURN_START":
-      return resolveTurnStart(state, action.playerId, rng);
+      return resolveTurnStart(state, action, rng);
 
     case "ACQUIRE_CARD":
       return acquireCard(state, action, rng);
 
     case "INSTALL_CARD":
-      return installCard(state, action);
+      return installCard(state, action, rng);
 
     case "USE_INSTALLED_CARD":
-      return useInstalledCard(state, action);
+      return useInstalledCard(state, action, rng);
 
     case "PLACE_LEGEND_CARD":
       return placeLegendCard(state, action);
@@ -98,6 +171,18 @@ export function applyAction(
     case "CONVERT_POWER":
       return convertPower(state, action);
 
+    case "SOPHIE_DISCARD_FOR_POWER":
+      return sophieDiscardForPower(state, action);
+
+    case "CHOCOLAT_CONVERT_POWER":
+      return chocolatConvertPower(state, action);
+
+    case "CROIX_SKIP_TURN_INSTALL":
+      return croixSkipTurnInstall(state, action, rng);
+
+    case "RESOLVE_PENDING_CHOICE":
+      return resolvePendingChoice(state, action);
+
     case "DISCARD_TO_HAND_LIMIT":
       return discardToHandLimit(state, action);
 
@@ -106,7 +191,12 @@ export function applyAction(
   }
 }
 
-function resolveTurnStart(state: GameState, playerId: string, rng: Rng): EngineResult<GameState> {
+function resolveTurnStart(
+  state: GameState,
+  action: Extract<GameAction, { type: "RESOLVE_TURN_START" }>,
+  rng: Rng,
+): EngineResult<GameState> {
+  const playerId = action.playerId;
   const turnCheck = requireCurrentPlayerTurn(state, playerId, "turnStart");
   if (!turnCheck.ok) return turnCheck;
   const playerResult = requirePlayer(state, playerId);
@@ -118,7 +208,7 @@ function resolveTurnStart(state: GameState, playerId: string, rng: Rng): EngineR
     used: false,
   }));
 
-  return ok({
+  let next: GameState = {
     ...state,
     phase: "turnActions",
     dice,
@@ -131,7 +221,26 @@ function resolveTurnStart(state: GameState, playerId: string, rng: Rng): EngineR
         detail: `ダイス${character.diceCount}個を振りました`,
       },
     ],
-  });
+  };
+
+  // 二ツ星のブレスレット・五ツ星のネックレス：他プレイヤーが所持している場合、
+  // 今振ったダイスの出目（2 or 5）を見て条件発動する。
+  next = applyOtherPlayersDiceRollTrigger(
+    next,
+    playerId,
+    dice.map((d) => d.face),
+  );
+
+  const diceBreadBefore = next.players[playerId]!.diceBreadCards.length;
+  const effectsResult = applyTurnStartEffects(next, playerId, rng, action);
+  if (!effectsResult.ok) return effectsResult;
+  next = effectsResult.value;
+
+  // 王立パン協会：他プレイヤーがサイコロパンカードを獲得するたびに発動する
+  const diceBreadGained = next.players[playerId]!.diceBreadCards.length - diceBreadBefore;
+  next = applyOtherPlayersDiceBreadGainTrigger(next, playerId, diceBreadGained);
+
+  return ok(next);
 }
 
 function acquireCard(
@@ -174,7 +283,7 @@ function acquireCard(
   }
 
   const player = playerResult.value;
-  return ok({
+  let next: GameState = {
     ...state,
     dice: diceResult.value,
     openMarket,
@@ -193,12 +302,53 @@ function acquireCard(
         detail: `${acquiredCardIds.join(", ")} を獲得しました`,
       },
     ],
-  });
+  };
+
+  next = applyOtherPlayersAcquireTrigger(next, action.playerId);
+
+  return ok(next);
+}
+
+/** 値切りの指輪の未消費軽減分を、指定された配分でパワーコストに適用する。 */
+function applyBargainRingAllocation(
+  player: PlayerState,
+  powerCost: Record<PowerType, number>,
+  allocation: Partial<Record<PowerType, number>> | undefined,
+): EngineResult<Record<PowerType, number>> {
+  if (!allocation) return ok(powerCost);
+  const available = player.pendingBargainRingReduction ?? 0;
+  if (available <= 0) {
+    return fail(
+      new EngineError("値切りの指輪の未消費の軽減がありません", "NO_BARGAIN_RING_REDUCTION"),
+    );
+  }
+  let totalAllocated = 0;
+  const next = { ...powerCost };
+  for (const [type, amount] of Object.entries(allocation) as [PowerType, number | undefined][]) {
+    if (!amount) continue;
+    if (amount > next[type]) {
+      return fail(
+        new EngineError(
+          `「${type}」の軽減指定がコストを超えています`,
+          "INVALID_BARGAIN_RING_ALLOCATION",
+        ),
+      );
+    }
+    next[type] -= amount;
+    totalAllocated += amount;
+  }
+  if (totalAllocated > available) {
+    return fail(
+      new EngineError("値切りの指輪の軽減残量を超えています", "INVALID_BARGAIN_RING_ALLOCATION"),
+    );
+  }
+  return ok(next);
 }
 
 function installCard(
   state: GameState,
   action: Extract<GameAction, { type: "INSTALL_CARD" }>,
+  rng: Rng,
 ): EngineResult<GameState> {
   const turnCheck = requireCurrentPlayerTurn(state, action.playerId, "turnActions");
   if (!turnCheck.ok) return turnCheck;
@@ -219,7 +369,9 @@ function installCard(
     );
   }
 
-  const requiredDice = card.cost.dice ?? 0;
+  // マリーの常時発動能力：必要サイコロ数を1つ不要にできる
+  const marieDiscount = player.characterId === "char.marie" ? 1 : 0;
+  const requiredDice = Math.max(0, (card.cost.dice ?? 0) - marieDiscount);
   if (action.dieIndices.length !== requiredDice) {
     return fail(
       new EngineError(
@@ -231,27 +383,65 @@ function installCard(
   const diceResult = markDiceUsed(state, action.dieIndices);
   if (!diceResult.ok) return diceResult;
 
-  const powerCost: Partial<Record<PowerType, number>> = {
+  const selectedFaces = action.dieIndices.map((idx) => state.dice[idx]!.face);
+  if (!diceFacesSatisfyGroups(selectedFaces, card.cost.diceFaceGroups)) {
+    return fail(
+      new EngineError("選択したダイスの出目が設置条件を満たしていません", "DICE_FACE_MISMATCH"),
+    );
+  }
+
+  const baseCost: Record<PowerType, number> = {
     money: card.cost.money ?? 0,
     authority: card.cost.authority ?? 0,
     magic: card.cost.magic ?? 0,
   };
+  const allocationResult = applyBargainRingAllocation(player, baseCost, action.bargainRingAllocation);
+  if (!allocationResult.ok) return allocationResult;
+  const powerCost = allocationResult.value;
+  const bargainRingUsed = action.bargainRingAllocation !== undefined;
+
   const powerResult = payPower(player.power, powerCost);
   if (!powerResult.ok) return powerResult;
 
   const newHand = [...player.hand];
   newHand.splice(newHand.indexOf(action.cardId), 1);
 
-  const installed: InstalledCard = {
-    instanceId: crypto.randomUUID(),
-    cardId: action.cardId,
-    installedThisTurn: true,
-    usedThisTurn: false,
-  };
+  // フランの固有能力：手札にある同名カードをもう1枚、無コストで同時設置する
+  let flanBonusUsedThisTurn = player.flanBonusUsedThisTurn ?? false;
+  const installedCards: InstalledCard[] = [
+    { instanceId: crypto.randomUUID(), cardId: action.cardId, installedThisTurn: true, usedThisTurn: false },
+  ];
+  let bonusVictoryPoints = 0;
+  if (action.flanBonusCopy) {
+    if (player.characterId !== "char.flan") {
+      return fail(new EngineError("この能力はフランのみ使用できます", "NOT_FLAN"));
+    }
+    if (flanBonusUsedThisTurn) {
+      return fail(new EngineError("フランの能力は1ターンに1回までです", "FLAN_BONUS_LIMIT"));
+    }
+    const secondIdx = newHand.indexOf(action.cardId);
+    if (secondIdx === -1) {
+      return fail(
+        new EngineError("同名のカードが手札にもう1枚ありません", "NO_SECOND_COPY_IN_HAND"),
+      );
+    }
+    newHand.splice(secondIdx, 1);
+    installedCards.push({
+      instanceId: crypto.randomUUID(),
+      cardId: action.cardId,
+      installedThisTurn: true,
+      usedThisTurn: false,
+    });
+    bonusVictoryPoints = card.victoryPoints ?? 0;
+    flanBonusUsedThisTurn = true;
+  }
 
-  const newVictoryPoints = player.victoryPoints + (card.victoryPoints ?? 0);
+  const newHandLimit =
+    action.cardId === "std.warehouse" ? player.handLimit + 2 : player.handLimit;
 
-  return ok({
+  const newVictoryPoints = player.victoryPoints + (card.victoryPoints ?? 0) + bonusVictoryPoints;
+
+  let next: GameState = {
     ...state,
     dice: diceResult.value,
     players: {
@@ -260,8 +450,11 @@ function installCard(
         ...player,
         power: powerResult.value,
         hand: newHand,
-        installed: [...player.installed, installed],
+        handLimit: newHandLimit,
+        installed: [...player.installed, ...installedCards],
         victoryPoints: newVictoryPoints,
+        pendingBargainRingReduction: bargainRingUsed ? undefined : player.pendingBargainRingReduction,
+        flanBonusUsedThisTurn,
       },
     },
     log: [
@@ -270,15 +463,23 @@ function installCard(
         turn: state.turnNumber,
         playerId: action.playerId,
         type: "INSTALL_CARD",
-        detail: `${card.name} を設置しました`,
+        detail: `${card.name} を設置しました${installedCards.length > 1 ? "（フランの能力で2枚）" : ""}`,
       },
     ],
-  });
+  };
+
+  for (const inst of installedCards) {
+    next = applyInstallImmediateEffect(next, action.playerId, inst.cardId, rng);
+    next = applyOtherPlayersInstallTrigger(next, action.playerId);
+  }
+
+  return ok(next);
 }
 
 function useInstalledCard(
   state: GameState,
   action: Extract<GameAction, { type: "USE_INSTALLED_CARD" }>,
+  rng: Rng,
 ): EngineResult<GameState> {
   const turnCheck = requireCurrentPlayerTurn(state, action.playerId, "turnActions");
   if (!turnCheck.ok) return turnCheck;
@@ -308,18 +509,113 @@ function useInstalledCard(
     );
   }
 
-  // TODO: ここで実際のカード効果（未実装）を state に適用する
-  const newInstalled = player.installed.map((c) =>
-    c.instanceId === action.instanceId ? { ...c, usedThisTurn: true } : c,
-  );
+  const markUsed = (installed: InstalledCard[]): InstalledCard[] =>
+    installed.map((c) => (c.instanceId === action.instanceId ? { ...c, usedThisTurn: true } : c));
 
-  return ok({
-    ...state,
-    players: {
-      ...state.players,
-      [action.playerId]: { ...player, installed: newInstalled },
-    },
-  });
+  switch (target.cardId) {
+    case "std.lean":
+    case "std.rich": {
+      const targetFace = target.cardId === "std.lean" ? 1 : 6;
+      const dieIdx = action.targetDieIndex;
+      if (dieIdx === undefined) {
+        return fail(new EngineError("targetDieIndex が必要です", "MISSING_TARGET_DIE"));
+      }
+      const die = state.dice[dieIdx];
+      if (!die) return fail(new EngineError(`存在しないダイス番号です: ${dieIdx}`, "INVALID_DIE_INDEX"));
+      if (die.used) return fail(new EngineError("使用済みのダイスは変更できません", "DIE_ALREADY_USED"));
+      const newDice = state.dice.map((d, i) => (i === dieIdx ? { ...d, face: targetFace as typeof d.face } : d));
+      return ok({
+        ...state,
+        dice: newDice,
+        players: {
+          ...state.players,
+          [action.playerId]: { ...player, installed: markUsed(player.installed) },
+        },
+      });
+    }
+    case "std.fingerTest": {
+      const dieIdx = action.targetDieIndex;
+      const delta = action.fingerTestDelta;
+      if (dieIdx === undefined || delta === undefined) {
+        return fail(
+          new EngineError("targetDieIndex と fingerTestDelta が必要です", "MISSING_TARGET_DIE"),
+        );
+      }
+      const die = state.dice[dieIdx];
+      if (!die) return fail(new EngineError(`存在しないダイス番号です: ${dieIdx}`, "INVALID_DIE_INDEX"));
+      if (die.used) return fail(new EngineError("使用済みのダイスは変更できません", "DIE_ALREADY_USED"));
+      const newFace = die.face + delta;
+      if (newFace < 1 || newFace > 6) {
+        return fail(new EngineError("出目が1〜6の範囲を超えます", "INVALID_DIE_FACE"));
+      }
+      const newDice = state.dice.map((d, i) => (i === dieIdx ? { ...d, face: newFace as typeof d.face } : d));
+      return ok({
+        ...state,
+        dice: newDice,
+        players: {
+          ...state.players,
+          [action.playerId]: { ...player, installed: markUsed(player.installed) },
+        },
+      });
+    }
+    case "std.mixer": {
+      const indices = action.rerollDieIndices ?? [];
+      const seen = new Set<number>();
+      for (const idx of indices) {
+        const die = state.dice[idx];
+        if (!die) return fail(new EngineError(`存在しないダイス番号です: ${idx}`, "INVALID_DIE_INDEX"));
+        if (die.used) return fail(new EngineError("使用済みのダイスは変更できません", "DIE_ALREADY_USED"));
+        if (seen.has(idx)) return fail(new EngineError(`ダイス番号が重複しています: ${idx}`, "INVALID_DIE_INDEX"));
+        seen.add(idx);
+      }
+      const newDice = state.dice.map((d, i) => (seen.has(i) ? { ...d, face: rollDie(rng) } : d));
+      return ok({
+        ...state,
+        dice: newDice,
+        players: {
+          ...state.players,
+          [action.playerId]: { ...player, installed: markUsed(player.installed) },
+        },
+      });
+    }
+    case "adv.bargainRing": {
+      return ok({
+        ...state,
+        players: {
+          ...state.players,
+          [action.playerId]: {
+            ...player,
+            installed: markUsed(player.installed),
+            pendingBargainRingReduction: 3,
+          },
+        },
+      });
+    }
+    case "adv.darkVault": {
+      const count = action.darkVaultTokenCount;
+      if (count === undefined || count < 1 || count > 3) {
+        return fail(
+          new EngineError("darkVaultTokenCount は1〜3で指定してください", "INVALID_TOKEN_COUNT"),
+        );
+      }
+      const powerResult = payPower(player.power, { money: count });
+      if (!powerResult.ok) return powerResult;
+      const newInstalled = markUsed(player.installed).map((c) =>
+        c.instanceId === action.instanceId ? { ...c, tokens: (c.tokens ?? 0) + count } : c,
+      );
+      return ok({
+        ...state,
+        players: {
+          ...state.players,
+          [action.playerId]: { ...player, power: powerResult.value, installed: newInstalled },
+        },
+      });
+    }
+    default:
+      return fail(
+        new NotImplementedError(`「${card.name}」の使用効果はまだ実装されていません`),
+      );
+  }
 }
 
 function placeLegendCard(
@@ -352,22 +648,141 @@ function placeLegendCard(
     );
   }
 
-  const requiredDice = card.cost.dice ?? 0;
-  if (action.dieIndices.length !== requiredDice) {
-    return fail(
-      new EngineError("必要なダイス数が一致しません", "DICE_COUNT_MISMATCH"),
-    );
-  }
-  const diceResult = markDiceUsed(state, action.dieIndices);
-  if (!diceResult.ok) return diceResult;
+  let diceResultValue = state.dice;
+  let diceBreadCardsAfterPipSum = player.diceBreadCards;
+  let pipSumDiceBreadSpent = 0;
 
-  const powerCost: Partial<Record<PowerType, number>> = {
+  if (card.cost.requiredPipSum !== undefined) {
+    // 出目合計コスト（無限鏡の大迷宮など）：dieIndices はこのターンに振ったダイス、
+    // diceBreadIndices は所持サイコロパンのうち、出目合計に充てるものを指す。cost.dice は使わない。
+    const dieIndices = action.dieIndices;
+    const diceBreadIndices = action.diceBreadIndices ?? [];
+
+    const seenDice = new Set<number>();
+    for (const idx of dieIndices) {
+      const die = state.dice[idx];
+      if (!die) return fail(new EngineError(`存在しないダイス番号です: ${idx}`, "INVALID_DIE_INDEX"));
+      if (die.used) return fail(new EngineError(`ダイス${idx}は使用済みです`, "DIE_ALREADY_USED"));
+      if (seenDice.has(idx)) {
+        return fail(new EngineError(`ダイス番号が重複しています: ${idx}`, "INVALID_DIE_INDEX"));
+      }
+      seenDice.add(idx);
+    }
+    const seenBread = new Set<number>();
+    for (const idx of diceBreadIndices) {
+      const face = player.diceBreadCards[idx];
+      if (face === undefined) {
+        return fail(
+          new EngineError(`存在しないサイコロパン番号です: ${idx}`, "INVALID_DICE_BREAD_INDEX"),
+        );
+      }
+      if (seenBread.has(idx)) {
+        return fail(
+          new EngineError(`サイコロパン番号が重複しています: ${idx}`, "INVALID_DICE_BREAD_INDEX"),
+        );
+      }
+      seenBread.add(idx);
+    }
+
+    const pipSum =
+      dieIndices.reduce((sum, idx) => sum + state.dice[idx]!.face, 0) +
+      diceBreadIndices.reduce((sum, idx) => sum + player.diceBreadCards[idx]!, 0);
+    if (pipSum < card.cost.requiredPipSum) {
+      return fail(
+        new EngineError(
+          `出目の合計が足りません（必要: ${card.cost.requiredPipSum}以上, 指定分の合計: ${pipSum}）`,
+          "INSUFFICIENT_PIP_SUM",
+        ),
+      );
+    }
+
+    const diceMarkResult = markDiceUsed(state, dieIndices);
+    if (!diceMarkResult.ok) return diceMarkResult;
+    diceResultValue = diceMarkResult.value;
+    diceBreadCardsAfterPipSum = player.diceBreadCards.filter((_, idx) => !seenBread.has(idx));
+    pipSumDiceBreadSpent = diceBreadIndices.length;
+  } else {
+    // マリーの常時発動能力：必要サイコロ数を1つ不要にできる
+    const marieDiscount = player.characterId === "char.marie" ? 1 : 0;
+    const requiredDice = Math.max(0, (card.cost.dice ?? 0) - marieDiscount);
+    if (action.dieIndices.length !== requiredDice) {
+      return fail(new EngineError("必要なダイス数が一致しません", "DICE_COUNT_MISMATCH"));
+    }
+    const diceMarkResult = markDiceUsed(state, action.dieIndices);
+    if (!diceMarkResult.ok) return diceMarkResult;
+    diceResultValue = diceMarkResult.value;
+
+    const selectedFaces = action.dieIndices.map((idx) => state.dice[idx]!.face);
+    if (!diceFacesSatisfyGroups(selectedFaces, card.cost.diceFaceGroups)) {
+      return fail(
+        new EngineError("選択したダイスの出目が設置条件を満たしていません", "DICE_FACE_MISMATCH"),
+      );
+    }
+  }
+
+  const baseCost: Record<PowerType, number> = {
     money: card.cost.money ?? 0,
     authority: card.cost.authority ?? 0,
     magic: card.cost.magic ?? 0,
   };
+  const allocationResult = applyBargainRingAllocation(player, baseCost, action.bargainRingAllocation);
+  if (!allocationResult.ok) return allocationResult;
+  const powerCost = allocationResult.value;
+  const bargainRingUsed = action.bargainRingAllocation !== undefined;
+
   const powerResult = payPower(player.power, powerCost);
   if (!powerResult.ok) return powerResult;
+
+  let handAfterDiscards = player.hand;
+  let installedAfterDiscards = player.installed;
+  let discardedCardIds: string[] = [];
+  if (card.cost.requiredDiscards && card.cost.requiredDiscards.length > 0) {
+    const discardResult = payRequiredDiscards(player, card.cost.requiredDiscards);
+    if (!discardResult.ok) return discardResult;
+    handAfterDiscards = discardResult.value.hand;
+    installedAfterDiscards = discardResult.value.installed;
+    discardedCardIds = discardResult.value.discardedCardIds;
+  }
+
+  const requiredAnyHandDiscardCount = card.cost.requiredAnyHandDiscardCount ?? 0;
+  if (requiredAnyHandDiscardCount > 0) {
+    const chosen = action.anyDiscardCardIds ?? [];
+    if (chosen.length !== requiredAnyHandDiscardCount) {
+      return fail(
+        new EngineError(
+          `捨てるカードの指定数が一致しません（必要: ${requiredAnyHandDiscardCount}, 指定: ${chosen.length}）`,
+          "DISCARD_COUNT_MISMATCH",
+        ),
+      );
+    }
+    const remainingHand = [...handAfterDiscards];
+    for (const cardId of chosen) {
+      const idx = remainingHand.indexOf(cardId);
+      if (idx === -1) {
+        return fail(
+          new EngineError(`手札にないカードを捨てようとしました: ${cardId}`, "CARD_NOT_IN_HAND"),
+        );
+      }
+      remainingHand.splice(idx, 1);
+    }
+    handAfterDiscards = remainingHand;
+    discardedCardIds = [...discardedCardIds, ...chosen];
+  }
+
+  const requiredDiceBreadCount = card.cost.requiredDiceBreadCount ?? 0;
+  if (diceBreadCardsAfterPipSum.length < requiredDiceBreadCount) {
+    return fail(
+      new EngineError(
+        `サイコロパンカードが不足しています（必要: ${requiredDiceBreadCount}, 所持: ${diceBreadCardsAfterPipSum.length}）`,
+        "INSUFFICIENT_DISCARD_MATERIAL",
+      ),
+    );
+  }
+  const diceBreadCardsAfter = diceBreadCardsAfterPipSum.slice(
+    0,
+    diceBreadCardsAfterPipSum.length - requiredDiceBreadCount,
+  );
+  const totalDiceBreadSpent = pipSumDiceBreadSpent + requiredDiceBreadCount;
 
   const installed: InstalledCard = {
     instanceId: crypto.randomUUID(),
@@ -378,27 +793,36 @@ function placeLegendCard(
 
   const isRow1 = action.row === "legend1";
   const newRow = row.filter((id) => id !== action.cardId);
-  // 補充：対応する山札から1枚引いて列に戻す（要確認: legend1/legend2 補充ルールの詳細は
-  // 物理版レイアウトを確認できていないため、対称的な暫定実装にしている）
-  const deck = isRow1 ? [...state.legend1Deck] : [...state.legend2Deck];
-  const drawn = deck.shift();
-  const replenishedRow = drawn ? [...newRow, drawn] : newRow;
+
+  // レジェンドⅠを設置したら、対応する列のⅡが新たに設置可能になる（山札から新カードを引くのではなく、
+  // 既に決まっている対応関係＝legendColumns に基づいてⅡをlegend2Rowへ追加する）。
+  let legend1Row = isRow1 ? newRow : state.legend1Row;
+  let legend2Row = isRow1 ? state.legend2Row : newRow;
+  if (isRow1) {
+    const column = state.legendColumns.find((c) => c.legend1Id === action.cardId);
+    if (column && !legend2Row.includes(column.legend2Id)) {
+      legend2Row = [...legend2Row, column.legend2Id];
+    }
+  }
 
   return ok({
     ...state,
-    dice: diceResult.value,
-    legend1Row: isRow1 ? replenishedRow : state.legend1Row,
-    legend1Deck: isRow1 ? deck : state.legend1Deck,
-    legend2Row: isRow1 ? state.legend2Row : replenishedRow,
-    legend2Deck: isRow1 ? state.legend2Deck : deck,
+    dice: diceResultValue,
+    marketDiscard: [...state.marketDiscard, ...discardedCardIds],
+    diceBreadDiscardCount: state.diceBreadDiscardCount + totalDiceBreadSpent,
+    legend1Row,
+    legend2Row,
     legendPlacedThisTurn: true,
     players: {
       ...state.players,
       [action.playerId]: {
         ...player,
         power: powerResult.value,
-        installed: [...player.installed, installed],
+        hand: handAfterDiscards,
+        installed: [...installedAfterDiscards, installed],
+        diceBreadCards: diceBreadCardsAfter,
         victoryPoints: player.victoryPoints + (card.victoryPoints ?? 0),
+        pendingBargainRingReduction: bargainRingUsed ? undefined : player.pendingBargainRingReduction,
       },
     },
     log: [
@@ -470,10 +894,10 @@ function gainPower(
     dice = diceResult.value;
     powerType = DIE_FACE_TO_POWER[dice[action.source.dieIndex]!.face];
   } else {
-    if (diceBreadCards < 1) {
+    if (diceBreadCards.length < 1) {
       return fail(new EngineError("サイコロパンカードを持っていません", "NO_DICE_BREAD"));
     }
-    diceBreadCards -= 1;
+    diceBreadCards = diceBreadCards.slice(0, -1);
     diceBreadDiscardCount += 1;
     powerType = action.source.powerType;
   }
@@ -517,6 +941,191 @@ function convertPower(
   });
 }
 
+/** ソフィ専用：手札のマーケットカードを1枚捨てて、金/権/魔いずれか1種類のパワーを1つ得る。 */
+function sophieDiscardForPower(
+  state: GameState,
+  action: Extract<GameAction, { type: "SOPHIE_DISCARD_FOR_POWER" }>,
+): EngineResult<GameState> {
+  const turnCheck = requireCurrentPlayerTurn(state, action.playerId, "turnActions");
+  if (!turnCheck.ok) return turnCheck;
+  const playerResult = requirePlayer(state, action.playerId);
+  if (!playerResult.ok) return playerResult;
+  const player = playerResult.value;
+
+  if (player.characterId !== "char.sophie") {
+    return fail(new EngineError("この能力はソフィのみ使用できます", "NOT_SOPHIE"));
+  }
+  const idx = player.hand.indexOf(action.cardId);
+  if (idx === -1) {
+    return fail(new EngineError("そのカードは手札にありません", "CARD_NOT_IN_HAND"));
+  }
+  const newHand = [...player.hand];
+  newHand.splice(idx, 1);
+
+  return ok({
+    ...state,
+    marketDiscard: [...state.marketDiscard, action.cardId],
+    players: {
+      ...state.players,
+      [action.playerId]: {
+        ...player,
+        hand: newHand,
+        power: { ...player.power, [action.powerType]: player.power[action.powerType] + 1 },
+      },
+    },
+  });
+}
+
+/** ショコラ専用：自分が所有する1つのパワーをパワー置き場に戻し、別のパワー1つを得る（1:1交換）。 */
+function chocolatConvertPower(
+  state: GameState,
+  action: Extract<GameAction, { type: "CHOCOLAT_CONVERT_POWER" }>,
+): EngineResult<GameState> {
+  const turnCheck = requireCurrentPlayerTurn(state, action.playerId, "turnActions");
+  if (!turnCheck.ok) return turnCheck;
+  const playerResult = requirePlayer(state, action.playerId);
+  if (!playerResult.ok) return playerResult;
+  const player = playerResult.value;
+
+  if (player.characterId !== "char.chocolat") {
+    return fail(new EngineError("この能力はショコラのみ使用できます", "NOT_CHOCOLAT"));
+  }
+  if (action.from === action.to) {
+    return fail(new EngineError("変換元と変換先が同じです", "SAME_POWER_TYPE"));
+  }
+  const powerResult = payPower(player.power, { [action.from]: 1 } as Partial<Record<PowerType, number>>);
+  if (!powerResult.ok) return powerResult;
+  const newPower = { ...powerResult.value, [action.to]: powerResult.value[action.to] + 1 };
+
+  return ok({
+    ...state,
+    players: { ...state.players, [action.playerId]: { ...player, power: newPower } },
+  });
+}
+
+/**
+ * クロワ専用：ゲーム中1度だけ、自分のターンに何もしない代わりに、オープンマーケットから
+ * カードを1枚無償で直接設置し、そのままターンを終える。
+ */
+function croixSkipTurnInstall(
+  state: GameState,
+  action: Extract<GameAction, { type: "CROIX_SKIP_TURN_INSTALL" }>,
+  rng: Rng,
+): EngineResult<GameState> {
+  const turnCheck = requireCurrentPlayerTurn(state, action.playerId, "turnStart");
+  if (!turnCheck.ok) return turnCheck;
+  const playerResult = requirePlayer(state, action.playerId);
+  if (!playerResult.ok) return playerResult;
+  const player = playerResult.value;
+
+  if (player.characterId !== "char.croix") {
+    return fail(new EngineError("この能力はクロワのみ使用できます", "NOT_CROIX"));
+  }
+  if (player.croixSkipAbilityUsed) {
+    return fail(new EngineError("この能力はゲーム中1度しか使用できません", "CROIX_ABILITY_USED"));
+  }
+  if (!state.openMarket.includes(action.cardId)) {
+    return fail(new EngineError("指定されたカードは場札にありません", "CARD_NOT_IN_MARKET"));
+  }
+
+  const card = getMarketCard(action.cardId);
+  const installed: InstalledCard = {
+    instanceId: crypto.randomUUID(),
+    cardId: action.cardId,
+    installedThisTurn: true,
+    usedThisTurn: false,
+  };
+
+  const afterInstall: GameState = {
+    ...state,
+    openMarket: (() => {
+      const idx = state.openMarket.indexOf(action.cardId);
+      const next = [...state.openMarket];
+      next.splice(idx, 1);
+      return next;
+    })(),
+    players: {
+      ...state.players,
+      [action.playerId]: {
+        ...player,
+        croixSkipAbilityUsed: true,
+        installed: [...player.installed, installed],
+        victoryPoints: player.victoryPoints + (card.victoryPoints ?? 0),
+      },
+    },
+    log: [
+      ...state.log,
+      {
+        turn: state.turnNumber,
+        playerId: action.playerId,
+        type: "CROIX_SKIP_TURN_INSTALL",
+        detail: `ターンをスキップし、${card.name} を無償設置しました`,
+      },
+    ],
+  };
+
+  return ok(advanceTurn(afterInstall, action.playerId, rng));
+}
+
+/**
+ * PendingChoice（パネテリア遊園地のカード種別選択、二ツ星のブレスレット／五ツ星のネックレスの
+ * 権/魔選択）を解決する。手番プレイヤーの制約は課さない（選択の対象者本人であればいつでもよい）。
+ */
+function resolvePendingChoice(
+  state: GameState,
+  action: Extract<GameAction, { type: "RESOLVE_PENDING_CHOICE" }>,
+): EngineResult<GameState> {
+  const choice = state.pendingChoices.find((c) => c.id === action.choiceId);
+  if (!choice) {
+    return fail(new EngineError("指定された選択はもう存在しません", "PENDING_CHOICE_NOT_FOUND"));
+  }
+  if (choice.playerId !== action.playerId) {
+    return fail(new EngineError("これはあなたが解決すべき選択ではありません", "NOT_YOUR_PENDING_CHOICE"));
+  }
+
+  const remainingChoices = state.pendingChoices.filter((c) => c.id !== action.choiceId);
+
+  if (choice.kind === "paneteriaCardType") {
+    if (!action.cardId || !state.openMarket.includes(action.cardId)) {
+      return fail(
+        new EngineError("指定されたカードは現在の場札にありません", "CARD_NOT_IN_MARKET"),
+      );
+    }
+    const player = state.players[action.playerId]!;
+    const acquired = state.openMarket.filter((id) => id === action.cardId);
+    const remainingMarket = state.openMarket.filter((id) => id !== action.cardId);
+    return ok({
+      ...state,
+      openMarket: remainingMarket,
+      pendingChoices: remainingChoices,
+      players: {
+        ...state.players,
+        [action.playerId]: { ...player, hand: [...player.hand, ...acquired] },
+      },
+    });
+  }
+
+  // twoStarBraceletPower | fiveStarNecklacePower
+  if (action.powerType !== "authority" && action.powerType !== "magic") {
+    return fail(
+      new EngineError("powerType は authority か magic を指定してください", "INVALID_POWER_CHOICE"),
+    );
+  }
+  const player = state.players[action.playerId]!;
+  const amount = choice.amount ?? 0;
+  return ok({
+    ...state,
+    pendingChoices: remainingChoices,
+    players: {
+      ...state.players,
+      [action.playerId]: {
+        ...player,
+        power: { ...player.power, [action.powerType]: player.power[action.powerType] + amount },
+      },
+    },
+  });
+}
+
 function discardToHandLimit(
   state: GameState,
   action: Extract<GameAction, { type: "DISCARD_TO_HAND_LIMIT" }>,
@@ -535,7 +1144,23 @@ function discardToHandLimit(
     }
     newHand.splice(idx, 1);
   }
-  if (newHand.length > player.handLimit) {
+
+  const discardDiceBreadCount = action.discardDiceBreadCount ?? 0;
+  if (discardDiceBreadCount > player.diceBreadCards.length) {
+    return fail(
+      new EngineError(
+        "持っている枚数を超えてサイコロパンカードを捨てようとしました",
+        "NOT_ENOUGH_DICE_BREAD",
+      ),
+    );
+  }
+  const newDiceBreadCards = player.diceBreadCards.slice(
+    0,
+    player.diceBreadCards.length - discardDiceBreadCount,
+  );
+
+  // 手札上限は「マーケットカード＋サイコロパンカード」の合計に対して適用される
+  if (newHand.length + newDiceBreadCards.length > player.handLimit) {
     return fail(
       new EngineError(
         `まだ手札上限（${player.handLimit}枚）を超えています`,
@@ -547,7 +1172,11 @@ function discardToHandLimit(
   return ok({
     ...state,
     marketDiscard: [...state.marketDiscard, ...action.cardIds],
-    players: { ...state.players, [action.playerId]: { ...player, hand: newHand } },
+    diceBreadDiscardCount: state.diceBreadDiscardCount + discardDiceBreadCount,
+    players: {
+      ...state.players,
+      [action.playerId]: { ...player, hand: newHand, diceBreadCards: newDiceBreadCards },
+    },
   });
 }
 
@@ -562,7 +1191,8 @@ function endTurn(
   if (!playerResult.ok) return playerResult;
   const player = playerResult.value;
 
-  if (player.hand.length > player.handLimit) {
+  // 手札上限は「マーケットカード＋サイコロパンカード」の合計に対して適用される
+  if (player.hand.length + player.diceBreadCards.length > player.handLimit) {
     return fail(
       new EngineError(
         `手札上限（${player.handLimit}枚）を超えています。先に DISCARD_TO_HAND_LIMIT を行ってください`,
@@ -570,6 +1200,17 @@ function endTurn(
       ),
     );
   }
+
+  return ok(advanceTurn(state, action.playerId, rng));
+}
+
+/**
+ * ターン終了共通処理：設置済みカードのフラグリセット、場札補充、20VP到達チェック、
+ * 次のプレイヤーへの手番移行（または最終ラウンド後のゲーム終了）を行う。
+ * END_TURN と CROIX_SKIP_TURN_INSTALL（ターンスキップ）の両方から呼ばれる。
+ */
+function advanceTurn(state: GameState, playerId: string, rng: Rng): GameState {
+  const player = state.players[playerId]!;
 
   // このプレイヤーの設置済みカードの「設置中」「使用済み」フラグをリセットする
   const resetInstalled = player.installed.map((c) => ({
@@ -582,7 +1223,12 @@ function endTurn(
     ...state,
     players: {
       ...state.players,
-      [action.playerId]: { ...player, installed: resetInstalled },
+      [playerId]: {
+        ...player,
+        installed: resetInstalled,
+        pendingBargainRingReduction: undefined,
+        flanBonusUsedThisTurn: false,
+      },
     },
     legendPlacedThisTurn: false,
   };
@@ -590,7 +1236,7 @@ function endTurn(
 
   // 20VP到達チェック（本来はVPが変化した瞬間に判定すべきだが、保険としてターン終了時にも確認する）
   if (next.finalRoundTriggeredBy === null) {
-    const trigger = next.playerOrder.find((id) => next.players[id]!.victoryPoints >= 20);
+    const trigger = next.playerOrder.find((id) => computeTotalVictoryPoints(next, id) >= 20);
     if (trigger) {
       next = {
         ...next,
@@ -613,10 +1259,10 @@ function endTurn(
   const nextPlayerId = next.playerOrder[nextIndex]!;
 
   if (next.finalRoundTriggeredBy !== null && nextPlayerId === next.finalRoundTriggeredBy) {
-    return ok(finishGame(next));
+    return finishGame(next);
   }
 
-  return ok({
+  return {
     ...next,
     currentPlayerIndex: nextIndex,
     phase: "turnStart",
@@ -624,17 +1270,17 @@ function endTurn(
     turnNumber: next.turnNumber + 1,
     log: [
       ...next.log,
-      { turn: next.turnNumber, playerId: action.playerId, type: "END_TURN", detail: "ターン終了" },
+      { turn: next.turnNumber, playerId, type: "END_TURN", detail: "ターン終了" },
     ],
-  });
+  };
 }
 
 function finishGame(state: GameState): GameState {
   let bestVp = -Infinity;
   for (const id of state.playerOrder) {
-    bestVp = Math.max(bestVp, state.players[id]!.victoryPoints);
+    bestVp = Math.max(bestVp, computeTotalVictoryPoints(state, id));
   }
-  let vpTied = state.playerOrder.filter((id) => state.players[id]!.victoryPoints === bestVp);
+  let vpTied = state.playerOrder.filter((id) => computeTotalVictoryPoints(state, id) === bestVp);
 
   let winnerIds = vpTied;
   if (vpTied.length > 1) {
