@@ -1,4 +1,7 @@
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import express from "express";
 import cors from "cors";
 import { Server, type Socket } from "socket.io";
@@ -14,11 +17,28 @@ import {
 import { addPlayer, createRoom, getRoom, pruneStaleRooms, touchRoom, type Room } from "./roomStore.js";
 
 const PORT = Number(process.env.PORT ?? 3001);
+// クライアントを別ホストから配信する場合のみ必要（例: 開発時の localhost:5173）。
+// サーバーが client/dist を同梱配信する場合（後述）は同一オリジンになるため実質不要。
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? "http://localhost:5173";
+
+const dirname = path.dirname(fileURLToPath(import.meta.url));
+// server と client を1プロセス・1ポートにまとめて配信する。
+// トンネル（cloudflared/ngrok等）やPaaSへのデプロイをサーバー1つ分で済ませるための構成。
+const clientDistPath = path.resolve(dirname, "../../client/dist");
+const serveClient = existsSync(clientDistPath);
 
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+if (serveClient) {
+  app.use(express.static(clientDistPath));
+  app.get("/", (_req, res) => res.sendFile(path.join(clientDistPath, "index.html")));
+} else {
+  console.log(
+    "client/dist が見つからないため静的配信はスキップします（`npm run build --workspace client` でビルドすると同梱配信されます）",
+  );
+}
 
 const httpServer = createServer(app);
 
