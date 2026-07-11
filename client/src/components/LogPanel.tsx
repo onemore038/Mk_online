@@ -5,7 +5,7 @@ export function LogPanel({ log }: { log: readonly GameEvent[] }) {
   return (
     <div className="log-panel">
       {[...recent].reverse().map((e, i) => (
-        <div key={i}>
+        <div key={log.length - i} className={i === 0 ? "log-entry-new" : ""}>
           [T{e.turn}] {e.playerId ? `${e.playerId}: ` : ""}
           {e.detail}
         </div>
