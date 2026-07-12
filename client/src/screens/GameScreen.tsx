@@ -148,6 +148,7 @@ export function GameScreen({ game, myPlayerId, sendAction }: Props) {
 
   if (!me) return <p>プレイヤー情報を取得できません</p>;
 
+  const marketStacks = groupStacks(game.openMarket);
   const myPendingChoices = game.pendingChoices.filter((c) => c.playerId === myPlayerId);
 
   function renderPendingChoicesPanel() {
@@ -298,6 +299,26 @@ export function GameScreen({ game, myPlayerId, sendAction }: Props) {
             </p>
           )}
         </div>
+
+        <div className="board-row">
+          <div className="panel">
+            <h2>オープンマーケット</h2>
+            <p className="hint">まだダイスを振っていないため閲覧のみです。</p>
+            <div className="grid cards">
+              {marketStacks.map(({ cardId, count }) => (
+                <CardTile key={cardId} cardId={cardId} count={count} />
+              ))}
+            </div>
+          </div>
+          <div className="panel">
+            <h2>手札（{me.hand.length}枚）</h2>
+            <div className="grid cards">
+              {me.hand.map((cardId, idx) => (
+                <CardTile key={`${cardId}-${idx}`} cardId={cardId} />
+              ))}
+            </div>
+          </div>
+        </div>
         </div>
         <div className="board-side">
           <div className="panel">
@@ -313,7 +334,6 @@ export function GameScreen({ game, myPlayerId, sendAction }: Props) {
   // 手札上限は「マーケットカード＋サイコロパンカード」の合計に対して適用される（reducer.ts の endTurn/discardToHandLimit 参照）
   const handExcess = me.hand.length + me.diceBreadCards.length - me.handLimit;
   const overHandLimit = handExcess > 0;
-  const marketStacks = groupStacks(game.openMarket);
 
   function toggleDiscard(cardId: string, idx: number) {
     const key = `${cardId}-${idx}`;
