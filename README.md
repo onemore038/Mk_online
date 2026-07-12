@@ -4,6 +4,8 @@
 
 > このリポジトリでは、対象ボードゲームの正式タイトル・発行元名・公式サイトURLは意図的に記載していません。実装の背景・詳細ルールは [CLAUDE.md](CLAUDE.md) と [docs/requirements.md](docs/requirements.md) を参照してください。
 
+対戦に誘う友人向けのかんたんなルール説明は [docs/rules-casual.md](docs/rules-casual.md) を参照してください。
+
 友人・知人同士で「部屋」を作り、任意人数（2人以上）でオンライン対戦できることを目的とした個人プロジェクトです。AIボットによる人数の穴埋めは行いません。
 
 ## 構成
@@ -88,6 +90,8 @@ npx localtunnel --port 3001
 ```
 
 表示された `https://xxxxx.trycloudflare.com`（または `https://xxxxx.loca.lt`）のようなURLを友達に共有すれば対戦できる。
+
+初めて遊ぶ友達には、URLと一緒に [docs/rules-casual.md](docs/rules-casual.md)（かんたんなルール説明）も渡しておくと当日スムーズ。
 
 **特徴（トレードオフ）**
 
