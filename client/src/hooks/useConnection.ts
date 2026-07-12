@@ -38,16 +38,16 @@ export function useConnection(): UseConnection {
   useEffect(() => {
     const onConnect = () => {
       setConnected(true);
-      const savedRoomId = sessionStorage.getItem(STORAGE_ROOM_ID);
-      const savedPlayerId = sessionStorage.getItem(STORAGE_PLAYER_ID);
+      const savedRoomId = localStorage.getItem(STORAGE_ROOM_ID);
+      const savedPlayerId = localStorage.getItem(STORAGE_PLAYER_ID);
       if (savedRoomId && savedPlayerId) {
         socket.emit("room:rejoin", { roomId: savedRoomId, playerId: savedPlayerId }, (res) => {
           if (res.ok) {
             setRoomId(savedRoomId);
             setPlayerId(savedPlayerId);
           } else {
-            sessionStorage.removeItem(STORAGE_ROOM_ID);
-            sessionStorage.removeItem(STORAGE_PLAYER_ID);
+            localStorage.removeItem(STORAGE_ROOM_ID);
+            localStorage.removeItem(STORAGE_PLAYER_ID);
           }
         });
       }
@@ -77,8 +77,8 @@ export function useConnection(): UseConnection {
 
   const createRoom = useCallback((nickname: string) => {
     socket.emit("room:create", { nickname }, (res) => {
-      sessionStorage.setItem(STORAGE_ROOM_ID, res.roomId);
-      sessionStorage.setItem(STORAGE_PLAYER_ID, res.playerId);
+      localStorage.setItem(STORAGE_ROOM_ID, res.roomId);
+      localStorage.setItem(STORAGE_PLAYER_ID, res.playerId);
       setRoomId(res.roomId);
       setPlayerId(res.playerId);
     });
@@ -90,16 +90,16 @@ export function useConnection(): UseConnection {
         setError(res.error);
         return;
       }
-      sessionStorage.setItem(STORAGE_ROOM_ID, targetRoomId.toUpperCase());
-      sessionStorage.setItem(STORAGE_PLAYER_ID, res.playerId);
+      localStorage.setItem(STORAGE_ROOM_ID, targetRoomId.toUpperCase());
+      localStorage.setItem(STORAGE_PLAYER_ID, res.playerId);
       setRoomId(targetRoomId.toUpperCase());
       setPlayerId(res.playerId);
     });
   }, []);
 
   const leaveRoom = useCallback(() => {
-    sessionStorage.removeItem(STORAGE_ROOM_ID);
-    sessionStorage.removeItem(STORAGE_PLAYER_ID);
+    localStorage.removeItem(STORAGE_ROOM_ID);
+    localStorage.removeItem(STORAGE_PLAYER_ID);
     setRoomId(null);
     setPlayerId(null);
     setLobby(null);

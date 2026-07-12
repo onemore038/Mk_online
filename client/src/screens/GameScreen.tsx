@@ -40,6 +40,12 @@ function requiredDiceCount(costDice: number | undefined, characterId: string): n
 
 const USE_PANEL_CARD_IDS = ["std.lean", "std.rich", "std.fingerTest", "std.mixer", "adv.darkVault"];
 
+/** USE_INSTALLED_CARD に対応する実装がある（＝能動的に「使用」できる）カードID。
+ * ここに無いカードは設置時ターン開始効果などのパッシブ効果のみを持ち、
+ * 使用アクションを送ってもエンジン側で NOT_IMPLEMENTED になるため、
+ * クリックしても何も起きないようにする（reducer.ts の USE_INSTALLED_CARD スイッチと対応させること）。*/
+const USABLE_CARD_IDS = new Set([...USE_PANEL_CARD_IDS, "adv.bargainRing"]);
+
 const POWER_LABEL: Record<PowerType, string> = { money: "お金", authority: "権力", magic: "魔力" };
 
 export function GameScreen({ game, myPlayerId, sendAction }: Props) {
@@ -337,6 +343,7 @@ export function GameScreen({ game, myPlayerId, sendAction }: Props) {
   }
 
   function handleInstalledClick(c: InstalledCard) {
+    if (!USABLE_CARD_IDS.has(c.cardId)) return;
     if (USE_PANEL_CARD_IDS.includes(c.cardId)) {
       setUseTarget({ instanceId: c.instanceId, cardId: c.cardId });
       setUseDie(null);
@@ -984,8 +991,18 @@ export function GameScreen({ game, myPlayerId, sendAction }: Props) {
                 <CardTile
                   key={c.instanceId}
                   cardId={c.cardId}
-                  disabled={!isMyTurn || c.installedThisTurn || c.usedThisTurn}
-                  extra={c.installedThisTurn ? "設置直後（使用不可）" : c.usedThisTurn ? "使用済み" : undefined}
+                  disabled={
+                    !USABLE_CARD_IDS.has(c.cardId) || !isMyTurn || c.installedThisTurn || c.usedThisTurn
+                  }
+                  extra={
+                    c.installedThisTurn
+                      ? "設置直後（使用不可）"
+                      : c.usedThisTurn
+                        ? "使用済み"
+                        : !USABLE_CARD_IDS.has(c.cardId)
+                          ? "パッシブ効果のみ（使用不可）"
+                          : undefined
+                  }
                   onClick={() => handleInstalledClick(c)}
                 />
               ))}
