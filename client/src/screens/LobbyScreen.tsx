@@ -14,12 +14,24 @@ const POWER_LABEL: Record<PowerType, string> = { money: "お金", authority: "�
 
 export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setInitialPower, startGame }: Props) {
   const [power, setPower] = useState<PowerPool>({ money: 4, authority: 0, magic: 0 });
+  const [detailCharacterId, setDetailCharacterId] = useState<string | null>(null);
 
   useEffect(() => {
     setInitialPower(power);
     // マウント時に一度だけ初期値をサーバーへ送る
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!detailCharacterId) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setDetailCharacterId(null);
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [detailCharacterId]);
+
+  const detailCharacter = detailCharacterId ? CHARACTERS.find((c) => c.id === detailCharacterId) : undefined;
 
   const me = lobby?.players.find((p) => p.playerId === playerId);
   const takenCharacterIds = new Set(
@@ -47,7 +59,14 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
               {p.nickname}
               {!p.connected ? "（切断中）" : ""}
             </span>
-            <span className="hint">
+            <span
+              className="hint"
+              onContextMenu={(e) => {
+                if (!p.characterId) return;
+                e.preventDefault();
+                setDetailCharacterId(p.characterId);
+              }}
+            >
               {p.characterId ? CHARACTERS.find((c) => c.id === p.characterId)?.name : "未選択"}
             </span>
           </div>
@@ -66,6 +85,10 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
                 className={`card ${isMine ? "selected" : ""} ${takenByOther ? "disabled" : ""}`}
                 disabled={takenByOther}
                 onClick={() => selectCharacter(c.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setDetailCharacterId(c.id);
+                }}
               >
                 <div className="name">{c.name}</div>
                 <div className="meta">{c.abilitySummary}</div>
@@ -75,6 +98,23 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
           })}
         </div>
       </div>
+
+      {detailCharacter && (
+        <div className="card-detail-backdrop" onClick={() => setDetailCharacterId(null)}>
+          <div className="card-detail-popover" onClick={(e) => e.stopPropagation()}>
+            <button
+              className="card-detail-close"
+              onClick={() => setDetailCharacterId(null)}
+              aria-label="閉じる"
+            >
+              ×
+            </button>
+            <div className="name">{detailCharacter.name}</div>
+            <p className="hint">{detailCharacter.abilitySummary}</p>
+            <p className="hint">ダイス: {detailCharacter.diceCount}個</p>
+          </div>
+        </div>
+      )}
 
       <div className="panel">
         <h2>初期パワー（合計4個を自由配分）</h2>
