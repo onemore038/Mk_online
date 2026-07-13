@@ -16,11 +16,17 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
   const [power, setPower] = useState<PowerPool>({ money: 4, authority: 0, magic: 0 });
   const [detailCharacterId, setDetailCharacterId] = useState<string | null>(null);
 
+  const me = lobby?.players.find((p) => p.playerId === playerId);
+  // ロールはゲーム開始時、パワーを合計10個獲得する（setup.ts の検証と一致させる）
+  const totalPower = me?.characterId === "char.roll" ? 10 : 4;
+
   useEffect(() => {
-    setInitialPower(power);
-    // マウント時に一度だけ初期値をサーバーへ送る
+    const next = { money: totalPower, authority: 0, magic: 0 };
+    setPower(next);
+    setInitialPower(next);
+    // totalPower（≒キャラクター選択）が変わるたびに配分をリセットしてサーバーへ送り直す
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [totalPower]);
 
   useEffect(() => {
     if (!detailCharacterId) return;
@@ -33,7 +39,6 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
 
   const detailCharacter = detailCharacterId ? CHARACTERS.find((c) => c.id === detailCharacterId) : undefined;
 
-  const me = lobby?.players.find((p) => p.playerId === playerId);
   const takenCharacterIds = new Set(
     lobby?.players.filter((p) => p.characterId && p.playerId !== playerId).map((p) => p.characterId),
   );
@@ -117,7 +122,7 @@ export function LobbyScreen({ roomId, playerId, lobby, selectCharacter, setIniti
       )}
 
       <div className="panel">
-        <h2>初期パワー（合計4個を自由配分）</h2>
+        <h2>初期パワー（合計{totalPower}個を自由配分）</h2>
         <div className="power-picker">
           {POWER_TYPES.map((t) => (
             <div className="stepper" key={t}>
