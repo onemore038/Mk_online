@@ -47,8 +47,8 @@ export function setupGame(options: SetupOptions): GameState {
   }
   for (const p of players) {
     const total = POWER_TYPES.reduce((sum, t) => sum + p.initialPower[t], 0);
-    // ロールはゲーム開始時、通常4個に加えて追加の10個（内訳自由）を得るため合計14個になる
-    const expected = p.characterId === "char.roll" ? 14 : 4;
+    // ロールはゲーム開始時、パワーを合計10個（内訳自由）獲得する
+    const expected = p.characterId === "char.roll" ? 10 : 4;
     if (total !== expected) {
       throw new EngineError(
         `初期パワーの合計は${expected}個である必要があります（プレイヤー ${p.playerId}: ${total}個）`,
